@@ -13,9 +13,9 @@ Felix alone, with no other datastore, and can be self-hosted.
 |---|---|---|
 | [felix](https://github.com/GetFelix/felix) | The broker, the control plane, client libraries for Rust, Python and TypeScript, and `felixctl` | 0.6.0-preview |
 | [felix-canvas](https://github.com/GetFelix/felix-canvas) | A multiplayer drawing canvas with live cursors, rich text, history you can scrub, and per-room sign-in | 0.1.0 |
-| [felix-webhook-relay](https://github.com/GetFelix/felix-webhook-relay) | A webhook relay that stores each webhook durably, delivers it with retries, and replays any endpoint after an outage | Self-hosting packages in progress |
+| [felix-webhook-relay](https://github.com/GetFelix/felix-webhook-relay) | A webhook relay that stores each webhook durably, delivers it with retries, and replays any endpoint after an outage | 0.1.0 |
 | [felix-arena](https://github.com/GetFelix/felix-arena) | A browser arena game in 3D, with a kill cam replayed from the match's log | Design stage |
-| felix-gateway | The browser gateway from felix-canvas, made reusable: WebSocket to Felix, with sign-in narrowed to one room or match | Being extracted |
+| [felix-gateway](https://github.com/GetFelix/felix-gateway) | A WebSocket gateway between browsers and Felix, with sign-in narrowed to one room or match | 0.1.0 |
 
 ## Getting started
 
