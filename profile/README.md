@@ -4,7 +4,7 @@ reach it over QUIC. Subscribers resume from an offset, so they can tell exactly
 which records they missed. One slow subscriber can't hold up the others.
 Durable streams can require a majority of replicas to acknowledge each write.
 
-This organization holds Felix and the projects built on it. Each one runs on
+This organization holds Felix and some of the projects built on it. Each one runs on
 Felix alone, with no other datastore, and can be self-hosted.
 
 ## Projects
