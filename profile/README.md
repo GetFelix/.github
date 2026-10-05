@@ -7,6 +7,8 @@ Durable streams can require a majority of replicas to acknowledge each write.
 This organization holds Felix and some of the projects built on it. Each one runs on
 Felix alone, with no other datastore, and can be self-hosted.
 
+Landing page: [getfelix.dev](https://getfelix.dev)
+
 ## Projects
 
 | Repository | What it is | Status |
