@@ -14,10 +14,25 @@ Landing page: [getfelix.dev](https://getfelix.dev)
 | Repository | What it is |
 |---|---|
 | [felix](https://github.com/GetFelix/felix) | The broker, the control plane, client libraries for Rust, Python and TypeScript, and `felixctl` |
+| [felix-gateway](https://github.com/GetFelix/felix-gateway) | A WebSocket gateway between browsers and Felix, with each connection narrowed to one scope |
+| [homebrew-tap](https://github.com/GetFelix/homebrew-tap) | Homebrew formulae for installing Felix |
+| [getfelix.github.io](https://github.com/GetFelix/getfelix.github.io) | The [getfelix.dev](https://getfelix.dev) website and blog |
+
+## Built on Felix
+
+| Repository | What it is |
+|---|---|
 | [felix-canvas](https://github.com/GetFelix/felix-canvas) | A multiplayer drawing canvas with live cursors, rich text, history you can scrub, and per-room sign-in |
 | [felix-webhook-relay](https://github.com/GetFelix/felix-webhook-relay) | A webhook relay that stores each webhook durably, delivers it with retries, and replays any endpoint after an outage |
-| [felix-arena](https://github.com/GetFelix/felix-arena) | A browser arena game in 3D, with a kill cam replayed from the match's log | Design stage |
-| [felix-gateway](https://github.com/GetFelix/felix-gateway) | A WebSocket gateway between browsers and Felix, with each connection narrowed to one scope |
+| [felix-arena](https://github.com/GetFelix/felix-arena) | A 3D arena game in the browser, with live play over in-memory streams and a kill cam replayed from the match's log |
+
+In design:
+
+| Repository | What it is |
+|---|---|
+| [felix-metro](https://github.com/GetFelix/felix-metro) | A 3D city simulator in the browser, where every trip, building and day is in a log you can scrub back through |
+| [felix-blocks](https://github.com/GetFelix/felix-blocks) | A voxel building game in the browser, solo or multiplayer, with the world stored as one cache key per chunk |
+| [felix-agents](https://github.com/GetFelix/felix-agents) | Coordination for AI agents: task queues, shared state, budgets, per-agent grants and a replayable record of every run |
 
 ## Getting started
 
