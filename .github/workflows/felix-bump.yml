@@ -70,11 +70,13 @@ jobs:
           NEW: ${{ inputs.version }}
           PRERELEASE: ${{ inputs.prerelease }}
           TEST_PR: ${{ inputs.test_pr }}
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           # Inputs reach the shell as data; reject anything that is not a version
           # before it goes near a branch name or a sed expression.
-          if ! [[ "$NEW" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+          if ! [[ "$NEW" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+(\.[0-9A-Za-z]+)*)?$ ]]; then
             echo "::error::'$NEW' is not a version like 0.6.1 or 0.7.0-preview.1"
             exit 1
           fi
@@ -104,23 +106,38 @@ jobs:
             echo "run=skip" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          # A late dispatch for an older release must not move the repo backwards.
-          newer=$(python3 - "$OLD" "$NEW" <<'PY'
-          import re, sys
+          # newer A B: succeeds when version B is newer than version A.
+          newer() {
+            python3 - "$1" "$2" <<'PY'
+          import sys
           def key(v):
               core, _, pre = v.partition("-")
               nums = tuple(int(x) for x in core.split("."))
               # A release sorts after its prereleases.
               parts = tuple((0, int(p), "") if p.isdigit() else (1, 0, p) for p in pre.split(".")) if pre else ()
               return nums, (0,) if pre else (1,), parts
-          print("yes" if key(sys.argv[2]) > key(sys.argv[1]) else "no")
+          sys.exit(0 if key(sys.argv[2]) > key(sys.argv[1]) else 1)
           PY
-          )
-          if [ "$newer" != yes ]; then
+          }
+          # A late dispatch for an older release must not move the repo backwards,
+          # whether the newer version is merged or still in an open bump PR.
+          if ! newer "$OLD" "$NEW"; then
             echo "::notice::Felix $NEW is older than $OLD, which this repo is already on"
             echo "run=skip" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          for head in $(gh pr list --repo "$REPO" --state open --json headRefName \
+              --jq '.[].headRefName | select(startswith("felix/bump-")) | select(. != "felix/bump-test")'); do
+            open_version=${head#felix/bump-}
+            if [ "$open_version" = "$NEW" ]; then
+              continue
+            fi
+            if ! newer "$open_version" "$NEW"; then
+              echo "::notice::An open bump PR already moves this repo to Felix $open_version"
+              echo "run=skip" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done
           echo "run=bump" >> "$GITHUB_OUTPUT"
 
       - name: Edit the pins
@@ -157,7 +174,8 @@ jobs:
                   ok=1
                   for c in "${crates[@]}"; do
                     locked=$(cargo metadata --format-version 1 --locked 2>/dev/null \
-                      | python3 -c "import json,sys; print(' '.join(p['version'] for p in json.load(sys.stdin)['packages'] if p['name']=='$c'))")
+                      | python3 -c "import json,sys; print(' '.join(p['version'] for p in json.load(sys.stdin)['packages'] if p['name']=='$c'))") \
+                      || locked=
                     [ "$locked" = "$NEW" ] || { echo "$c locked at '$locked', want $NEW"; ok=0; }
                   done
                   [ "$ok" = 1 ] && break
@@ -259,7 +277,8 @@ jobs:
 
           if [ "$MODE" = bump ]; then
             gh pr merge "$pr" --repo "$REPO" --auto --squash
-            # A bump PR for an earlier release that has not merged yet is now stale.
+            # Any other open bump PR is for an earlier release (the plan step
+            # skips when a newer one is open), so it is stale now.
             for old_pr in $(gh pr list --repo "$REPO" --state open --json number,headRefName \
                 --jq ".[] | select(.headRefName | startswith(\"felix/bump-\")) | select(.headRefName != \"$branch\" and .headRefName != \"felix/bump-test\") | .number"); do
               gh pr close "$old_pr" --repo "$REPO" --delete-branch --comment "Superseded by #$pr (Felix $NEW)."
