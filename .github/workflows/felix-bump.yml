@@ -1,0 +1,286 @@
+# Opens the PR that moves a companion repo onto a new Felix release.
+#
+# A companion repo calls this from its own felix-release.yml, which runs on the
+# `felix-release` repository_dispatch that GetFelix/felix's release workflow
+# sends. The repo supplies two files:
+#
+#   .felix-version         key=value manifest: the Felix version the repo is on,
+#                          the Cargo and npm lockfiles to regenerate, and whether
+#                          prereleases are wanted.
+#   .github/felix-bump.sh  `felix-bump.sh <old> <new>`: edits every pin of the
+#                          Felix version in that repo, and fails if one is missing.
+#
+# The PR is opened with the getfelix-release-bot App's token, because pushes and
+# PRs made with GITHUB_TOKEN do not start the repo's CI.
+name: Felix bump
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: Felix version without the leading v, e.g. 0.6.1
+        required: true
+        type: string
+      prerelease:
+        description: The release is a prerelease
+        required: false
+        type: boolean
+        default: false
+      test_pr:
+        description: Open a draft test PR that only touches .felix-version, to check the bot and CI
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      FELIX_RELEASE_BOT_APP_ID:
+        required: true
+      FELIX_RELEASE_BOT_PRIVATE_KEY:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  bump:
+    name: Bump Felix
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # One bump at a time per repo, so two releases in a row do not race on the branch.
+    concurrency:
+      group: felix-bump-${{ github.repository }}
+      cancel-in-progress: false
+    steps:
+      - name: Create a token for this repo
+        id: token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ secrets.FELIX_RELEASE_BOT_APP_ID }}
+          private-key: ${{ secrets.FELIX_RELEASE_BOT_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ steps.token.outputs.token }}
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Read the manifest
+        id: plan
+        env:
+          NEW: ${{ inputs.version }}
+          PRERELEASE: ${{ inputs.prerelease }}
+          TEST_PR: ${{ inputs.test_pr }}
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # Inputs reach the shell as data; reject anything that is not a version
+          # before it goes near a branch name or a sed expression.
+          if ! [[ "$NEW" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+(\.[0-9A-Za-z]+)*)?$ ]]; then
+            echo "::error::'$NEW' is not a version like 0.6.1 or 0.7.0-preview.1"
+            exit 1
+          fi
+          [ -f .felix-version ] || { echo "::error::.felix-version is missing"; exit 1; }
+          get() { sed -n "s/^$1=//p" .felix-version | head -n1; }
+          OLD=$(get version)
+          [ -n "$OLD" ] || { echo "::error::.felix-version has no version= line"; exit 1; }
+          {
+            echo "old=$OLD"
+            echo "cargo_dirs=$(get cargo_dirs)"
+            echo "cargo_crates=$(get cargo_crates)"
+            echo "npm_dirs=$(get npm_dirs)"
+          } >> "$GITHUB_OUTPUT"
+
+          if [ "$TEST_PR" = true ]; then
+            echo "run=test" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # A version with a suffix is a prerelease whatever the flag says.
+          if [[ "$PRERELEASE" = true || "$NEW" == *-* ]] && [ "$(get prerelease)" != true ]; then
+            echo "::notice::Felix $NEW is a prerelease and this repo has not opted in (prerelease=true in .felix-version)"
+            echo "run=skip" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$OLD" = "$NEW" ]; then
+            echo "::notice::Already on Felix $NEW"
+            echo "run=skip" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # newer A B: succeeds when version B is newer than version A.
+          newer() {
+            python3 - "$1" "$2" <<'PY'
+          import sys
+          def key(v):
+              core, _, pre = v.partition("-")
+              nums = tuple(int(x) for x in core.split("."))
+              # A release sorts after its prereleases.
+              parts = tuple((0, int(p), "") if p.isdigit() else (1, 0, p) for p in pre.split(".")) if pre else ()
+              return nums, (0,) if pre else (1,), parts
+          sys.exit(0 if key(sys.argv[2]) > key(sys.argv[1]) else 1)
+          PY
+          }
+          # A late dispatch for an older release must not move the repo backwards,
+          # whether the newer version is merged or still in an open bump PR.
+          if ! newer "$OLD" "$NEW"; then
+            echo "::notice::Felix $NEW is older than $OLD, which this repo is already on"
+            echo "run=skip" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          for head in $(gh pr list --repo "$REPO" --state open --json headRefName \
+              --jq '.[].headRefName | select(startswith("felix/bump-")) | select(. != "felix/bump-test")'); do
+            open_version=${head#felix/bump-}
+            if [ "$open_version" = "$NEW" ]; then
+              continue
+            fi
+            if ! newer "$open_version" "$NEW"; then
+              echo "::notice::An open bump PR already moves this repo to Felix $open_version"
+              echo "run=skip" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done
+          echo "run=bump" >> "$GITHUB_OUTPUT"
+
+      - name: Edit the pins
+        if: ${{ steps.plan.outputs.run == 'bump' }}
+        env:
+          OLD: ${{ steps.plan.outputs.old }}
+          NEW: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          [ -x .github/felix-bump.sh ] || { echo "::error::.github/felix-bump.sh is missing or not executable"; exit 1; }
+          .github/felix-bump.sh "$OLD" "$NEW"
+          sed -i "s/^version=.*/version=$NEW/" .felix-version
+
+      - name: Regenerate Cargo.lock
+        if: ${{ steps.plan.outputs.run == 'bump' && steps.plan.outputs.cargo_dirs != '' }}
+        env:
+          NEW: ${{ inputs.version }}
+          DIRS: ${{ steps.plan.outputs.cargo_dirs }}
+          CRATES: ${{ steps.plan.outputs.cargo_crates }}
+        run: |
+          set -euo pipefail
+          read -ra crates <<< "$CRATES"
+          [ "${#crates[@]}" -gt 0 ] || { echo "::error::cargo_dirs is set but cargo_crates is empty"; exit 1; }
+          for dir in $DIRS; do
+            (
+              cd "$dir"
+              rustup toolchain install >/dev/null 2>&1 || true
+              args=()
+              for c in "${crates[@]}"; do args+=(-p "$c"); done
+              # The release workflow dispatches right after publishing, and the
+              # crates.io index can take a few minutes to show the new version.
+              for attempt in $(seq 1 20); do
+                if cargo update "${args[@]}"; then
+                  ok=1
+                  for c in "${crates[@]}"; do
+                    locked=$(cargo metadata --format-version 1 --locked 2>/dev/null \
+                      | python3 -c "import json,sys; print(' '.join(p['version'] for p in json.load(sys.stdin)['packages'] if p['name']=='$c'))") \
+                      || locked=
+                    [ "$locked" = "$NEW" ] || { echo "$c locked at '$locked', want $NEW"; ok=0; }
+                  done
+                  [ "$ok" = 1 ] && break
+                fi
+                [ "$attempt" = 20 ] && { echo "::error::$dir: could not lock ${crates[*]} at $NEW"; exit 1; }
+                sleep 30
+              done
+            )
+          done
+
+      - name: Regenerate package-lock.json
+        if: ${{ steps.plan.outputs.run == 'bump' && steps.plan.outputs.npm_dirs != '' }}
+        env:
+          DIRS: ${{ steps.plan.outputs.npm_dirs }}
+        run: |
+          set -euo pipefail
+          for dir in $DIRS; do
+            (
+              cd "$dir"
+              # Same propagation delay as crates.io, for the npm registry.
+              for attempt in $(seq 1 20); do
+                npm install --package-lock-only --ignore-scripts --no-audit --no-fund && break
+                [ "$attempt" = 20 ] && { echo "::error::$dir: npm install failed"; exit 1; }
+                sleep 30
+              done
+            )
+          done
+
+      - name: Make the test change
+        if: ${{ steps.plan.outputs.run == 'test' }}
+        env:
+          RUN_ID: ${{ github.run_id }}
+        run: echo "# felix bump bot test run $RUN_ID" >> .felix-version
+
+      - name: Open or update the PR
+        if: ${{ steps.plan.outputs.run == 'bump' || steps.plan.outputs.run == 'test' }}
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          SLUG: ${{ steps.token.outputs.app-slug }}
+          MODE: ${{ steps.plan.outputs.run }}
+          NEW: ${{ inputs.version }}
+          OLD: ${{ steps.plan.outputs.old }}
+          REPO: ${{ github.repository }}
+          BASE: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          bot_id=$(gh api "users/${SLUG}[bot]" --jq .id)
+          git config user.name "${SLUG}[bot]"
+          git config user.email "${bot_id}+${SLUG}[bot]@users.noreply.github.com"
+
+          release="https://github.com/GetFelix/felix/releases/tag/v$NEW"
+          if [ "$MODE" = test ]; then
+            branch=felix/bump-test
+            title="TEST: felix bump bot"
+            body="Checks that the Felix bump bot can open a PR here and that CI runs on it. Close it without merging."
+          else
+            branch="felix/bump-$NEW"
+            title="chore: use Felix $NEW"
+            # The release's CHANGELOG section at its tag, so the PR shows what changed.
+            notes=$(gh api -H 'Accept: application/vnd.github.raw' \
+                "repos/GetFelix/felix/contents/CHANGELOG.md?ref=v$NEW" 2>/dev/null \
+              | python3 -c '
+          import re, sys
+          want = "## [" + sys.argv[1] + "]"
+          out, on = [], False
+          for line in sys.stdin:
+              if line.startswith("## "):
+                  if on:
+                      break
+                  on = line.startswith(want)
+                  continue
+              if on:
+                  out.append(line)
+          # A bare #123 would link to an issue in this repo instead of in Felix.
+          notes = re.sub(r"(?<![\w/\[])#(\d+)", r"GetFelix/felix#\1", "".join(out).strip())
+          # Stay well under the 65536-character limit on a PR body.
+          print(notes if len(notes) < 60000 else notes[:60000] + "\n\n(Cut short; see the release.)")
+          ' "$NEW" || true)
+            [ -n "$notes" ] || notes="(No CHANGELOG section for $NEW found at v$NEW; see the release.)"
+            body=$(printf 'Moves this repo from Felix %s to [Felix %s](%s).\n\nOpened by the felix-release workflow. Its CI is the check that this repo works on the new release.\n\n## Felix %s changes\n\n%s\n' \
+              "$OLD" "$NEW" "$release" "$NEW" "$notes")
+          fi
+
+          git checkout -B "$branch"
+          git add -A
+          git commit -q -m "$title"
+          git push --force origin "HEAD:refs/heads/$branch"
+
+          pr=$(gh pr list --repo "$REPO" --head "$branch" --state open --json number --jq '.[0].number // empty')
+          if [ -n "$pr" ]; then
+            gh pr edit "$pr" --repo "$REPO" --title "$title" --body "$body"
+          elif [ "$MODE" = test ]; then
+            gh pr create --repo "$REPO" --base "$BASE" --head "$branch" --title "$title" --body "$body" --draft
+          else
+            gh pr create --repo "$REPO" --base "$BASE" --head "$branch" --title "$title" --body "$body"
+          fi
+          pr=$(gh pr list --repo "$REPO" --head "$branch" --state open --json number --jq '.[0].number')
+          echo "::notice::PR #$pr: $title"
+
+          if [ "$MODE" = bump ]; then
+            gh pr merge "$pr" --repo "$REPO" --auto --squash
+            # Any other open bump PR is for an earlier release (the plan step
+            # skips when a newer one is open), so it is stale now.
+            for old_pr in $(gh pr list --repo "$REPO" --state open --json number,headRefName \
+                --jq ".[] | select(.headRefName | startswith(\"felix/bump-\")) | select(.headRefName != \"$branch\" and .headRefName != \"felix/bump-test\") | .number"); do
+              gh pr close "$old_pr" --repo "$REPO" --delete-branch --comment "Superseded by #$pr (Felix $NEW)."
+            done
+          fi
