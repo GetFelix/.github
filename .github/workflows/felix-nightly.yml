@@ -11,17 +11,21 @@
 #                             to point at Felix main.
 #   .github/felix-nightly.sh  starts Felix from the :nightly images
 #                             ($FELIX_IMAGE_TAG) and runs the repo's integration
-#                             tests. It exits non-zero when they fail.
+#                             tests. It exits non-zero when they fail. It must not
+#                             run `npm ci` or `cargo --locked` afterwards: the
+#                             manifests and lockfiles were rewritten and no longer
+#                             match the ones in git.
 #
 # A failed run opens an issue labelled `felix-nightly` in the calling repo, or
-# comments on the one that is open. A green run closes it.
+# comments on the one that is open. A green run closes it. Only runs on the
+# default branch report; a run on another branch just passes or fails.
 name: Felix nightly
 
 on:
   workflow_call:
     inputs:
       timeout_minutes:
-        description: How long the job may run
+        description: How long .github/felix-nightly.sh may run
         required: false
         type: number
         default: 60
@@ -33,7 +37,9 @@ jobs:
   nightly:
     name: Against Felix main
     runs-on: ubuntu-latest
-    timeout-minutes: ${{ inputs.timeout_minutes }}
+    # The tests step has its own limit (inputs.timeout_minutes): a job that times
+    # out counts as cancelled, and a cancelled run reports nothing.
+    timeout-minutes: 150
     permissions:
       contents: read
       issues: write
@@ -51,18 +57,23 @@ jobs:
         id: manifest
         run: |
           set -euo pipefail
-          get() { [ -f .felix-version ] && sed -n "s/^$1=//p" .felix-version | head -n1 || true; }
+          [ -f .felix-version ] || { echo "::error::.felix-version is missing"; exit 1; }
+          get() { sed -n "s/^$1=//p" .felix-version | head -n1; }
           {
             echo "cargo_dirs=$(get cargo_dirs)"
             echo "cargo_crates=$(get cargo_crates)"
             echo "npm_dirs=$(get npm_dirs)"
           } >> "$GITHUB_OUTPUT"
+          if [ -z "$(get cargo_dirs)$(get npm_dirs)" ]; then
+            echo "::error::.felix-version sets neither cargo_dirs nor npm_dirs, so nothing would point at Felix main"
+            exit 1
+          fi
           [ -x .github/felix-nightly.sh ] || { echo "::error::.github/felix-nightly.sh is missing or not executable"; exit 1; }
 
-      # Felix's nightly build moves the `nightly` tag and pushes the :nightly
-      # images from one commit. The tag moves after the images, and stays put
-      # when a build fails, so the two can disagree. The images are what the
-      # tests run, so their revision wins and the crates are built from it.
+      # The `nightly` tag and the :nightly images come from one build, but the
+      # tag moves last, so after a failed build they can be a day apart. The
+      # tests use the tag's commit for the crates and say so when the images
+      # were built from another.
       - name: Find the Felix commit
         id: felix
         env:
@@ -71,20 +82,18 @@ jobs:
           set -euo pipefail
           ref=$(gh api repos/GetFelix/felix/git/ref/tags/nightly --jq '[.object.type, .object.sha] | @tsv')
           kind=${ref%%$'\t'*}
-          tag_sha=${ref##*$'\t'}
+          sha=${ref##*$'\t'}
           if [ "$kind" = tag ]; then
-            tag_sha=$(gh api "repos/GetFelix/felix/git/tags/$tag_sha" --jq .object.sha)
+            sha=$(gh api "repos/GetFelix/felix/git/tags/$sha" --jq .object.sha)
           fi
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::'$sha' is not a commit"; exit 1; }
           docker pull --quiet "ghcr.io/getfelix/felix-broker:$FELIX_IMAGE_TAG" >/dev/null
           image_sha=$(docker image inspect \
             --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
             "ghcr.io/getfelix/felix-broker:$FELIX_IMAGE_TAG")
-          sha=$tag_sha
-          if [ -n "$image_sha" ] && [ "$image_sha" != "$tag_sha" ]; then
-            echo "::warning::The nightly tag is at $tag_sha but the :nightly images were built from $image_sha; using the images' commit"
-            sha=$image_sha
+          if [ -n "$image_sha" ] && [ "$image_sha" != "$sha" ]; then
+            echo "::warning::The nightly tag is at $sha but the :nightly images were built from $image_sha"
           fi
-          [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::'$sha' is not a commit"; exit 1; }
           echo "Felix commit: $sha"
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "FELIX_NIGHTLY_SHA=$sha" >> "$GITHUB_ENV"
@@ -107,11 +116,12 @@ jobs:
         run: |
           set -euo pipefail
           [ -n "$CRATES" ] || { echo "::error::cargo_dirs is set but cargo_crates is empty"; exit 1; }
-          pip install --quiet tomlkit
-          rustup toolchain install >/dev/null 2>&1 || true
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet tomlkit
           read -ra crates <<< "$CRATES"
           for dir in $DIRS; do
-            python3 - "$dir" <<'PY'
+            (cd "$dir" && rustup toolchain install >/dev/null 2>&1 || true)
+            "$RUNNER_TEMP/venv/bin/python" - "$dir" <<'PY'
           import os, pathlib, sys
           import tomlkit
 
@@ -131,13 +141,14 @@ jobs:
                       name = dep.get("package", key)
                   if name not in crates:
                       continue
-                  seen.add(name)
                   if isinstance(dep, str):
+                      seen.add(name)
                       deps[key] = tomlkit.parse(f'x = {{ git = "{URL}", rev = "{sha}" }}')["x"]
                       continue
                   # An entry that inherits from the workspace is rewritten where it is declared.
                   if dep.get("workspace") is True:
                       continue
+                  seen.add(name)
                   for stale in ("version", "registry", "path", "branch", "tag"):
                       if stale in dep:
                           del dep[stale]
@@ -167,18 +178,31 @@ jobs:
                   print(f"rewrote {path}")
 
           # felix-transport is usually only a dependency of felix-client, so not every crate is declared here.
+          # An entry that inherits from a workspace above this directory is not a declaration.
           if not seen:
-              sys.exit(f"::error::{root}: no dependency on {', '.join(sorted(crates))} found")
+              sys.exit(f"::error::{root}: no declaration of {', '.join(sorted(crates))} to rewrite")
           PY
             args=()
             for c in "${crates[@]}"; do args+=(-p "$c"); done
             (cd "$dir" && cargo update "${args[@]}")
           done
 
+      - name: Cache directories
+        id: cache_dirs
+        if: ${{ steps.manifest.outputs.cargo_dirs != '' }}
+        env:
+          DIRS: ${{ steps.manifest.outputs.cargo_dirs }}
+        run: |
+          {
+            echo "dirs<<EOF"
+            tr ' ' '\n' <<< "$DIRS"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - uses: Swatinem/rust-cache@v2
         if: ${{ steps.manifest.outputs.cargo_dirs != '' }}
         with:
-          workspaces: ${{ steps.manifest.outputs.cargo_dirs }}
+          workspaces: ${{ steps.cache_dirs.outputs.dirs }}
           cache-on-failure: true
 
       # The package is a napi addon, and the npm package ships the addon in
@@ -206,6 +230,7 @@ jobs:
             Linux-x86_64) tag=linux-x64-gnu lib=libfelix_typescript.so ;;
             Linux-aarch64) tag=linux-arm64-gnu lib=libfelix_typescript.so ;;
             Darwin-arm64) tag=darwin-arm64 lib=libfelix_typescript.dylib ;;
+            Darwin-x86_64) tag=darwin-x64 lib=libfelix_typescript.dylib ;;
             *) echo "::error::no addon name for $(uname -sm)"; exit 1 ;;
           esac
           mkdir -p "$stage"
@@ -221,11 +246,13 @@ jobs:
           pkg["files"].append(f"felix.{tag}.node")
           (dst / "package.json").write_text(json.dumps(pkg, indent=2))
           PY
-          tgz="$RUNNER_TEMP/$(cd "$stage" && npm pack --silent --pack-destination "$RUNNER_TEMP")"
+          # Inside the checkout, so a relative path reaches it from any package.json.
+          mkdir -p .felix-nightly
+          tgz="$PWD/.felix-nightly/$(cd "$stage" && npm pack --silent --pack-destination "$PWD/.felix-nightly")"
           echo "Packed $tgz"
           for dir in $DIRS; do
             python3 - "$dir" "$tgz" <<'PY'
-          import json, pathlib, sys
+          import json, os, pathlib, sys
           root, tgz = pathlib.Path(sys.argv[1]), sys.argv[2]
           hits = 0
           for path in sorted(root.rglob("package.json")):
@@ -235,7 +262,8 @@ jobs:
               changed = False
               for field in ("dependencies", "devDependencies", "optionalDependencies", "peerDependencies"):
                   if "felix-client" in pkg.get(field, {}):
-                      pkg[field]["felix-client"] = f"file:{tgz}"
+                      rel = os.path.relpath(tgz, path.parent)
+                      pkg[field]["felix-client"] = f"file:{rel}"
                       changed = True
               if changed:
                   path.write_text(json.dumps(pkg, indent=2) + "\n")
@@ -249,10 +277,11 @@ jobs:
 
       - name: Run .github/felix-nightly.sh
         id: tests
+        timeout-minutes: ${{ inputs.timeout_minutes }}
         run: .github/felix-nightly.sh
 
       - name: Report
-        if: ${{ always() && job.status != 'cancelled' }}
+        if: ${{ always() && job.status != 'cancelled' && github.ref_name == github.event.repository.default_branch }}
         env:
           GH_TOKEN: ${{ github.token }}
           STATUS: ${{ job.status }}
@@ -272,7 +301,10 @@ jobs:
           gh label create felix-nightly --repo "$REPO" --color d93f0b \
             --description "The nightly run against Felix main failed" 2>/dev/null || true
           open=$(gh issue list --repo "$REPO" --label felix-nightly --state open --json number --jq '.[0].number // empty')
-          commit="[\`${FELIX_SHA:0:12}\`](https://github.com/GetFelix/felix/commit/$FELIX_SHA)"
+          commit="(not resolved)"
+          if [ -n "$FELIX_SHA" ]; then
+            commit="[\`${FELIX_SHA:0:12}\`](https://github.com/GetFelix/felix/commit/$FELIX_SHA)"
+          fi
           if [ "$STATUS" = success ]; then
             if [ -n "$open" ]; then
               gh issue comment "$open" --repo "$REPO" --body "Green again on Felix $commit: $RUN_URL"
@@ -281,7 +313,7 @@ jobs:
             exit 0
           fi
           failed=$(grep '=failure$' <<< "$STEPS" | head -n1 | sed 's/=failure$//' || true)
-          failed=${failed:-"(a step before the tests; see the run)"}
+          failed=${failed:-"(setup before the tests; see the run)"}
           body=$(printf 'Run: %s\nFelix commit: %s\nFailing step: %s\n\nThe nightly points this repo at the Felix commit behind the `nightly` tag and runs `.github/felix-nightly.sh` against the `:nightly` images. The run log has the details. This issue closes itself when a nightly run passes.\n' \
             "$RUN_URL" "$commit" "$failed")
           if [ -n "$open" ]; then
