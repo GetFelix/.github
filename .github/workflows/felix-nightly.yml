@@ -247,8 +247,9 @@ jobs:
           (dst / "package.json").write_text(json.dumps(pkg, indent=2))
           PY
           # Inside the checkout, so a relative path reaches it from any package.json.
-          mkdir -p .felix-nightly
-          tgz="$PWD/.felix-nightly/$(cd "$stage" && npm pack --silent --pack-destination "$PWD/.felix-nightly")"
+          dest="$PWD/.felix-nightly"
+          mkdir -p "$dest"
+          tgz="$dest/$(cd "$stage" && npm pack --silent --pack-destination "$dest")"
           echo "Packed $tgz"
           for dir in $DIRS; do
             python3 - "$dir" "$tgz" <<'PY'
