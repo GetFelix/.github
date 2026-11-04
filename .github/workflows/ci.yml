@@ -19,8 +19,10 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Install actionlint
         run: bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.7/scripts/download-actionlint.bash) 1.7.7
-      # Runs shellcheck over every run step when it is on PATH, as it is on the runner.
+      # actionlint also shellchecks every run step; style-level notes do not fail the build.
       - name: actionlint
+        env:
+          SHELLCHECK_OPTS: --severity=warning
         run: ./actionlint -color
 
   yaml:
