@@ -32,7 +32,7 @@ In design:
 |---|---|
 | [felix-metro](https://github.com/GetFelix/felix-metro) | A 3D city simulator in the browser, where every trip, building and day is in a log you can scrub back through |
 | [felix-blocks](https://github.com/GetFelix/felix-blocks) | A voxel building game in the browser, solo or multiplayer, with the world stored as one cache key per chunk |
-| [felix-agents](https://github.com/GetFelix/felix-agents) | Coordination for AI agents: task queues, shared state, budgets, per-agent grants and a replayable record of every run |
+| [KBL](https://github.com/GetFelix/KBL) | A work tracker for coding agents: bugs in from GitHub, Azure DevOps or Jira, one agent per item, people guiding from a dashboard, every step in one log |
 
 ## Getting started
 
